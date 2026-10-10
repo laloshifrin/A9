@@ -1,0 +1,26 @@
+# secrets — never publish
+a9_camera.json
+.env
+
+# packet captures (contain decryptable device secrets)
+*.pcap
+*.pcapng
+
+# vendor binaries — not ours to redistribute, and large.
+# Keep your own locally; they stay out of the repo.
+*.apk
+*.bin
+*.elf
+
+# generated output
+*.jpg
+*.jpeg
+*.png
+frames/
+frames2/
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/

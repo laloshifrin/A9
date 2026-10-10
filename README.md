@@ -1,0 +1,129 @@
+# A9 local camera client
+
+A standalone, local client for the cheap XCThings / Linklemo "A9" WiFi camera
+(PCB `INO-IPC-A9`, Beken BK7252N, Android app `Linklemo` / `com.xcthings.fchan`).
+It finds a camera you own on your LAN, authenticates, and pulls a JPEG, with no
+cloud, no vendor app, and no external Python dependencies.
+
+Built for local interoperability with a camera I own (the goal was a Home Assistant
+feed). Along the way it documents the device's `pprpc` protocol and a credential
+disclosure worth knowing about.
+
+## The short version of the security finding
+
+The camera answers an unauthenticated UDP broadcast with an encrypted packet, and
+that packet is encrypted with a key that is **hardcoded in the firmware and the app
+and shared across every unit**. Decrypt it and you get the device's own
+`paired_auth_secret` in cleartext, which is all you need to log in and watch the
+video. So anyone on the same network can harvest the credential from one broadcast.
+Details in [`PROTOCOL.md`](PROTOCOL.md) §J. An independent write-up of the same
+device reached the same conclusion about the transport (see references).
+
+Use this only against cameras you own.
+
+## Setup
+
+One-time: the tools need the shared pprpc prekey, which is not committed. Put it in a
+local `.env`:
+
+```bash
+cp .env.example .env     # then set A9_PREKEY= in .env   (or: export A9_PREKEY=...)
+```
+
+`A9_PREKEY` is a fixed secret hardcoded in the firmware and app, shared across all
+units (not device-specific). This repo doesn't ship the value; it's the same one
+documented in the public analyses under [References](#references). `.env` is gitignored.
+
+## Quick start
+
+No pip install needed (pure-Python AES fallback is bundled). On the same network as
+the camera, or joined to its AP:
+
+```bash
+# discover the camera, read its own credentials, grab a frame — zero input
+python3 a9_live_snapshot.py -o snapshot.jpg
+
+# just list cameras on the network
+python3 a9_discover.py
+
+# save the camera's details once, then reuse (skips discovery next time)
+python3 a9_discover.py --save-config          # writes a9_camera.json (chmod 600)
+python3 a9_live_snapshot.py -o snapshot.jpg   # reads a9_camera.json if present
+```
+
+### Live feed (browser / Home Assistant)
+
+```bash
+python3 a9_mjpeg_server.py                     # then open http://127.0.0.1:8080/
+python3 a9_mjpeg_server.py --bind 0.0.0.0      # expose to other hosts (e.g. HA)
+```
+
+It holds one session to the camera and serves `/stream.mjpg` (MJPEG, ~10 fps),
+`/snapshot.jpg` (latest still), and `/` (a viewer page). It sends the camera's keepalive
+(a `107` ping ~2/s acking frames received), so the stream runs continuously at full rate;
+a stall watchdog reconnects only if the network actually drops.
+`/status` returns JSON (battery, firmware/model, connected/streaming) decoded from the
+camera's `2780` status pushes, handy for a Home Assistant REST sensor.
+
+For Home Assistant, point an **MJPEG IP Camera** at `.../stream.mjpg`, or a **Generic
+Camera** still-image URL at `.../snapshot.jpg`. The feed is unauthenticated, so it
+binds to `127.0.0.1` unless you pass `--bind 0.0.0.0`; keep it inside your own network.
+
+`a9_camera.json` holds a device credential, so it is written `0600` and is
+gitignored. Keep it local.
+
+## Files
+
+| file | purpose |
+|---|---|
+| `a9_live_snapshot.py` | online: grab a JPEG; auto-discovers IP + credentials, or reads the config |
+| `a9_mjpeg_server.py` | online: live MJPEG + snapshot HTTP server (browser / Home Assistant) |
+| `a9_discover.py` | online: UDP discovery; decodes DID / IP / port / firmware / secret; writes the config |
+| `a9_aes.py` | pure-Python AES-CBC (stdlib only, so the tools run with no pip / no internet) |
+| `a9_keys.py` | loads the shared prekey from `A9_PREKEY` / `.env` (not hardcoded) |
+| `extract_a9_snapshot.py` | offline: a packet capture to the first JPEG (also a library used by the live client) |
+| `extract_a9_frames.py` | offline: a capture to all frames plus a contact sheet |
+| `decode_a9_pcap.py` | offline: decode the CTRL handshake and commands from a capture |
+| `PROTOCOL.md` | the full protocol writeup (framing, crypto, discovery, command catalog) |
+
+## Firmware
+
+The firmware dump and the de-interleaved application image are **not included** (they
+are the vendor's, and large). Two ways to get one:
+
+- **Download a dump of this exact board**: `XCThings_Linklemo_A9_INO-IPC-V2.3_(BluePCB).bin`
+  is in [`openshwprojects/FlashDumps`](https://github.com/openshwprojects/FlashDumps/tree/main/IoT/BK7252N)
+  (originally shared on an elektroda.com forum thread).
+- **Dump your own**: read the SPI flash and remove the Beken CRC interleaving
+  (32 data bytes + 2 CRC bytes per block); see [`PROTOCOL.md`](PROTOCOL.md) §0.
+
+The addresses in `PROTOCOL.md` are virtual addresses in the de-interleaved image at
+base `0x00010000`.
+
+## How it works
+
+See [`PROTOCOL.md`](PROTOCOL.md). In brief: `pprpc` over TCP/UDP port 20190,
+protobuf payloads, AES-256-CBC with keys derived by MD5 from a hardcoded secret
+(CTRL) or the per-session key (MEDIA). The video is MJPEG at 640x480; the "HD/UHD"
+settings in the app do not change the live stream.
+
+## References
+
+- FuseTim, "The inSecurity Camera", an independent analysis of the same device:
+  <https://fusetim.space/posts/20251005-the-insecurity-camera/>
+- `pprpc` transport library (what the firmware/app are built on):
+  <https://github.com/pprpc> (the `core` module also survives on the Go module proxy,
+  `proxy.golang.org/github.com/pprpc/core`)
+- Firmware dump of this exact board:
+  <https://github.com/openshwprojects/FlashDumps/tree/main/IoT/BK7252N>
+- Related independent work on the same camera family:
+  [`IvanFogel/ino-a9-local-bridge`](https://github.com/IvanFogel/ino-a9-local-bridge)
+  (local PPRPC client + MJPEG bridge with Home Assistant integration) and
+  [`Yeti47/cheap-shot`](https://github.com/Yeti47/cheap-shot) (Go PPRPC implementation)
+- Vendor: XC Things; app `Linklemo` / `com.xcthings.fchan`
+- Hardware: PCB `INO-IPC-A9` (also sold as "Pinmei A9"), Beken BK7252N
+
+## Scope and legal
+
+For local interoperability and security research on hardware you own. Do not use it
+against devices you do not own. No warranty.

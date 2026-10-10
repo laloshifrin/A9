@@ -22,26 +22,13 @@ def main():
     pcap, outdir = sys.argv[1], sys.argv[2]
     os.makedirs(outdir, exist_ok=True)
     streams = P.read_pcap_streams(pcap)
-    sk = X.recover_session_key(streams)
-    if not sk:
-        sys.exit("could not recover session key from CTRL handshake")
-    sys.stderr.write(f"[*] session key recovered ({len(sk)} chars) — do not publish it\n")
-
-    frags = [body for (s_, sp, d_, dp), st in streams.items() if sp == P.PORT
-             for mt, flag, body in P.iter_pprpc(st) if mt == 6]
-    starts = [k for k, f in enumerate(frags) if (f[0] >> 7) == 1]
-    sys.stderr.write(f"[*] {len(frags)} MEDIA fragments, {len(starts)} frames\n")
-
-    ok = miss = 0
-    for fi in range(len(starts)):
-        s = starts[fi]
-        e = starts[fi + 1] if fi + 1 < len(starts) else len(frags)
-        jpg = P.decrypt_media_frame(frags[s:e], sk)
-        if jpg:
-            open(os.path.join(outdir, f"frame_{fi:03d}.jpg"), "wb").write(jpg); ok += 1
-        else:
-            miss += 1
-    sys.stderr.write(f"[*] wrote {ok} frames ({miss} incomplete/truncated)\n")
+    flow, sk = X.select_session(streams)
+    sys.stderr.write(f"[*] session key recovered ({len(sk)} chars); keep private\n")
+    count = 0
+    for count, jpg in enumerate(X.session_frames(streams, flow, sk), start=1):
+        with open(os.path.join(outdir, f"frame_{count - 1:03d}.jpg"), "wb") as f:
+            f.write(jpg)
+    sys.stderr.write(f"[*] wrote {count} complete frames\n")
 
     try:
         from PIL import Image, ImageFile

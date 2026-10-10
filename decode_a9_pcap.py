@@ -162,7 +162,8 @@ def main():
     streams = read_pcap_tcp(args.input)
     if not streams:
         raise SystemExit(f"no tcp/{PORT} payload found in capture")
-    for (src, sp, dst, dp), st in streams.items():
+    for flow, st in streams.items():
+        src, sp, dst, dp = flow[:4]
         decode_direction(f"{src}:{sp} -> {dst}:{dp}", st)
 
 if __name__ == "__main__":

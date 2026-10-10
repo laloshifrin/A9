@@ -208,62 +208,118 @@ def decode_status_2780(pt):
     return st
 
 # ---------- pcap ----------
+MAX_TCP_STREAM = 64 * 1024 * 1024
+MAX_JPEG_BYTES = 8 * 1024 * 1024
+
+class MediaFragments(list):
+    """Bound the total retained bytes for a single JPEG."""
+    def __init__(self):
+        super().__init__()
+        self.byte_count = 0
+    def append(self, body):
+        if len(self) >= 4096 or self.byte_count + len(body) > MAX_JPEG_BYTES:
+            self.clear()
+            raise ValueError("MEDIA frame exceeded fragment/byte limit")
+        super().append(body)
+        self.byte_count += len(body)
+    def clear(self):
+        super().clear()
+        self.byte_count = 0
+
 def reassemble_tcp(segs):
-    """Sequence-aware TCP reassembly. Places each segment at its seq offset so
-    retransmits/overlaps don't duplicate bytes and missing segments don't collapse
-    gaps (they stay as zero-fill, keeping later data aligned). No 32-bit wrap handling."""
+    """Reassemble contiguous bytes, unwrap sequence numbers, reject gaps/oversize.
+
+    Segments must be in capture order. Conflicting retransmissions are rejected.
+    Missing bytes are never synthesized.
+    """
     if not segs:
         return b""
-    base = min(s for s, _ in segs)
+    anchor = segs[0][0]
+    high = anchor
+    unwrapped = []
+    for seq, payload in segs:
+        offset = ((seq - (high & 0xffffffff) + (1 << 31)) % (1 << 32)) - (1 << 31)
+        absolute = high + offset
+        high = max(high, absolute + len(payload))
+        unwrapped.append((absolute, payload))
+    base = min(seq for seq, _ in unwrapped)
     buf = bytearray()
-    for seq, pl in sorted(segs):
+    for seq, payload in sorted(unwrapped):
         off = seq - base
-        if off < 0:
-            continue
-        end = off + len(pl)
-        if end > len(buf):
-            buf.extend(b"\x00" * (end - len(buf)))
-        buf[off:end] = pl                # overwrite overlaps; retransmits are identical
+        end = off + len(payload)
+        if end > MAX_TCP_STREAM:
+            raise ValueError("TCP stream exceeds reassembly limit")
+        if off > len(buf):
+            raise ValueError("capture has missing TCP bytes")
+        overlap = min(len(payload), len(buf) - off)
+        if buf[off:off + overlap] != payload[:overlap]:
+            raise ValueError("conflicting TCP retransmission")
+        buf.extend(payload[overlap:])
     return bytes(buf)
 
 def read_pcap_streams(path, port=PORT):
-    """Parse a classic pcap and return {(src,sport,dst,dport): reassembled_tcp_bytes}
-    for TCP flows touching `port`. Supports DLT EN10MB/RAW/NULL/LINUX_SLL/SLL2."""
-    import sys
-    data = open(path, "rb").read()
-    magic = data[:4]
-    if magic == b"\xa1\xb2\xc3\xd4":   end = ">"
-    elif magic == b"\xd4\xc3\xb2\xa1": end = "<"
-    elif magic == b"\x0a\x0d\x0d\x0a":
-        sys.exit("pcapng not supported; capture with tcpdump -w (classic pcap)")
-    else:
-        sys.exit("not a pcap file")
-    linktype = struct.unpack(end + "I", data[20:24])[0]
-    i = 24; flows = {}
-    while i + 16 <= len(data):
-        _, _, caplen, _ = struct.unpack(end + "IIII", data[i:i+16]); i += 16
-        pkt = data[i:i+caplen]; i += caplen
-        if linktype == 1:
-            if len(pkt) >= 14 and pkt[12:14] not in (b"\x08\x00", b"\x86\xdd"): continue
-            off = 14
-        elif linktype == 101: off = 0
-        elif linktype == 0:   off = 4
-        elif linktype == 113: off = 16
-        elif linktype == 276: off = 20
-        else: off = 0
-        if len(pkt) < off + 20: continue
-        ip = pkt[off:]
-        if (ip[0] >> 4) != 4: continue
-        ihl = (ip[0] & 0xF) * 4
-        if ip[9] != 6: continue
-        src = ".".join(map(str, ip[12:16])); dst = ".".join(map(str, ip[16:20]))
-        tcp = ip[ihl:]
-        sport, dport = struct.unpack(">HH", tcp[0:4])
-        seq = struct.unpack(">I", tcp[4:8])[0]
-        payload = tcp[(tcp[12] >> 4) * 4:]
-        if not payload or port not in (sport, dport): continue
-        flows.setdefault((src, sport, dst, dport), []).append((seq, payload))
-    return {k: reassemble_tcp(v) for k, v in flows.items()}
+    """Return {(src,sport,dst,dport,session): bytes} for classic IPv4 TCP pcap.
+
+    SYNs and closed connections separate reused tuples. Captures starting midstream
+    are supported, but capture gaps are rejected.
+    """
+    with open(path, "rb") as f:
+        header = f.read(24)
+        if len(header) != 24:
+            raise ValueError("truncated pcap header")
+        magic = header[:4]
+        if magic == b"\xa1\xb2\xc3\xd4": end = ">"
+        elif magic == b"\xd4\xc3\xb2\xa1": end = "<"
+        elif magic == b"\x0a\x0d\x0d\x0a":
+            raise ValueError("pcapng not supported; use classic pcap")
+        else: raise ValueError("not a pcap file")
+        linktype = struct.unpack(end + "I", header[20:24])[0]
+        offsets = {1:14, 101:0, 0:4, 113:16, 276:20}
+        if linktype not in offsets:
+            raise ValueError("unsupported pcap link type")
+        flows = {}; connections = {}; session_id = 0
+        while True:
+            record = f.read(16)
+            if not record: break
+            if len(record) != 16: raise ValueError("truncated pcap record")
+            _, _, caplen, _ = struct.unpack(end + "IIII", record)
+            if caplen > MAX_TCP_STREAM: raise ValueError("pcap packet exceeds limit")
+            pkt = f.read(caplen)
+            if len(pkt) != caplen: raise ValueError("truncated pcap packet")
+            off = offsets[linktype]
+            if linktype == 1 and pkt[12:14] != b"\x08\x00": continue
+            ip = pkt[off:]
+            if len(ip) < 20 or ip[0] >> 4 != 4 or ip[9] != 6: continue
+            ihl = (ip[0] & 15) * 4
+            total = struct.unpack(">H", ip[2:4])[0]
+            if ihl < 20 or total < ihl + 20 or total > len(ip):
+                raise ValueError("truncated or invalid IPv4/TCP packet")
+            if struct.unpack(">H", ip[6:8])[0] & 0x3fff:
+                raise ValueError("fragmented IPv4 is unsupported")
+            tcp = ip[ihl:total]
+            sport, dport, seq = struct.unpack(">HHI", tcp[:8])
+            if port not in (sport, dport): continue
+            hlen = (tcp[12] >> 4) * 4
+            if hlen < 20 or hlen > len(tcp): raise ValueError("invalid TCP header")
+            src = ".".join(map(str, ip[12:16])); dst = ".".join(map(str, ip[16:20]))
+            flow = (src, sport, dst, dport)
+            conn = tuple(sorted(((src, sport), (dst, dport))))
+            flags = tcp[13]
+            syn = bool(flags & 2 and not flags & 16)
+            previous = connections.get(conn)
+            if previous is None or (syn and (previous[1] != (flow, seq) or previous[2])):
+                session_id += 1
+                connections[conn] = (session_id, (flow, seq) if syn else None, False)
+            elif previous[2] and not flags & 16:
+                session_id += 1
+                connections[conn] = (session_id, None, False)
+            current = connections[conn]
+            payload = tcp[hlen:]
+            if payload:
+                flows.setdefault(flow + (current[0],), []).append(((seq + bool(flags & 2)) & 0xffffffff, payload))
+            if flags & 5:
+                connections[conn] = (current[0], current[1], True)
+    return {flow: reassemble_tcp(segments) for flow, segments in flows.items()}
 
 # ---------- live socket reader ----------
 import time as _time

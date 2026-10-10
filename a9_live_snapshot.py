@@ -28,35 +28,40 @@ def send_ctrl(s, seq, cmd, plaintext=b""):
     return seq + 1
 
 # ---------- credential / command sourcing from a pcap ----------
-def creds_from_pcap(path):
+def capture_client_stream(path):
     streams = P.read_pcap_streams(path)
-    for (s_, sp, d_, dp), st in streams.items():
-        if dp != P.PORT: continue
-        for mt, flag, body in P.iter_pprpc(st):
-            if mt != 4: continue
-            cmd, seq, rpc, ct = P.ctrl_exhdr(body)
-            if cmd == P.CMD_LANAUTH:
-                pt = P.ctrl_decrypt(cmd, seq, rpc, ct)
-                if pt:
-                    f = P.pb_parse(pt)
-                    if 2 in f and 3 in f:
-                        return f[2][0], f[3][0]
-    return None, None
+    clients = [stream for flow, stream in streams.items() if flow[3] == P.PORT]
+    if len(clients) != 1:
+        raise SystemExit("capture must contain exactly one client session")
+    return clients[0]
+
+def creds_from_pcap(path):
+    matches = []
+    for mt, flag, body in P.iter_pprpc(capture_client_stream(path)):
+        if mt != 4: continue
+        cmd, seq, rpc, ct = P.ctrl_exhdr(body)
+        if cmd != P.CMD_LANAUTH or rpc != 0: continue
+        pt = P.ctrl_decrypt(cmd, seq, rpc, ct)
+        fields = P.pb_parse(pt) if pt else {}
+        did = fields.get(2, [None])[0]
+        secret = fields.get(3, [None])[0]
+        if isinstance(did, bytes) and isinstance(secret, bytes):
+            matches.append((did, secret))
+    if len(matches) > 1:
+        raise SystemExit("capture contains multiple LanAuth requests")
+    return matches[0] if matches else (None, None)
 
 def replay_commands_from_pcap(path):
     """Ordered (cmd, plaintext) for the C->S CTRL commands the app sent, excluding
     LanAuth and heartbeats. Mirrors the app's exact pre-MEDIA sequence if --full-replay."""
-    streams = P.read_pcap_streams(path)
     out = []
-    for (s_, sp, d_, dp), st in streams.items():
-        if dp != P.PORT: continue
-        for mt, flag, body in P.iter_pprpc(st):      # stream order == send order
-            if mt != 4: continue
-            cmd, seq, rpc, ct = P.ctrl_exhdr(body)
-            if cmd in (P.CMD_LANAUTH, P.CMD_HELLO, P.CMD_PING): continue
-            pt = b"" if len(ct) == 0 else P.ctrl_decrypt(cmd, seq, rpc, ct)
-            if pt is not None:                        # keep empty-payload cmds (VideoPlay, …)
-                out.append((cmd, pt))
+    for mt, flag, body in P.iter_pprpc(capture_client_stream(path)):
+        if mt != 4: continue
+        cmd, seq, rpc, ct = P.ctrl_exhdr(body)
+        if rpc != 0 or cmd in (P.CMD_LANAUTH, P.CMD_HELLO, P.CMD_PING): continue
+        pt = b"" if not ct else P.ctrl_decrypt(cmd, seq, rpc, ct)
+        if pt is not None:
+            out.append((cmd, pt))
     return out
 
 # ---------- main ----------
@@ -82,31 +87,17 @@ def main():
                     help="replay the whole captured command sequence (from --creds-from)")
     a = ap.parse_args()
 
-    did = a.did.encode() if a.did else None
-    secret = a.secret.encode() if a.secret else None
-    target_ip = None if (a.ip in (None, "auto")) else a.ip
+    did, secret = a.did, a.secret
     if a.creds_from and not (did and secret):
-        did, secret = creds_from_pcap(a.creds_from)
-
-    # config file: if present, use it instead of discovery
-    if not a.no_config and not (did and secret and target_ip):
-        cfg = D.load_config(a.config)
-        if cfg:
-            if cfg.get("did") and not did: did = cfg["did"].encode()
-            if cfg.get("secret") and not secret: secret = cfg["secret"].encode()
-            if cfg.get("ip") and target_ip is None: target_ip = cfg["ip"]
-            sys.stderr.write(f"[*] loaded {a.config} (did={cfg.get('did')} ip={cfg.get('ip')})\n")
-
-    # auto-discover to fill in whatever's still missing (strict on --did)
-    if not (did and secret) or target_ip is None:
-        sys.stderr.write("[*] discovering camera over UDP…\n")
-        d_did, d_secret, d_ip = D.creds_from_discovery(target_ip, a.did, a.disc_wait)
-        if d_did and not did: did = d_did
-        if d_secret and not secret: secret = d_secret
-        if d_ip and target_ip is None: target_ip = d_ip
-        if d_did:
-            sys.stderr.write(f"[*] discovered {d_did.decode()} at {d_ip} "
-                             f"(secret {'recovered' if d_secret else 'not in reply'})\n")
+        p_did, p_secret = creds_from_pcap(a.creds_from)
+        if p_did and p_secret:
+            if did and did != p_did.decode():
+                raise SystemExit("--did does not match the capture's camera")
+            did = did or p_did.decode()
+            secret = secret or p_secret.decode()
+    target_ip, did, secret = D.resolve_credentials(
+        None if a.ip in (None, "auto") else a.ip, did, secret,
+        a.config, a.no_config, a.disc_wait)
 
     if a.save_config and did and secret and target_ip:
         D.save_config(a.config, {"did": did.decode(), "ip": target_ip,
@@ -171,7 +162,7 @@ def _grab(s, did, secret, a):
             s.sendall(P.build_ctrl(rseq, P.CMD_HELLO, P.pb_varint_field(1, 1), flag=0x0D))
 
     def pump(dur):
-        media = []; end = time.time() + dur
+        media = P.MediaFragments(); end = time.time() + dur
         while time.time() < end:
             try:
                 mt, mf, body = rdr.next_frame(timeout=max(0.05, end - time.time()))
@@ -197,26 +188,24 @@ def _grab(s, did, secret, a):
         replay = replay_commands_from_pcap(a.creds_from)
     else:
         replay = [(2653, b""), (2645, b""), (P.CMD_VIDEOPLAY, b"")]
-    early_media = []
+    early_media = P.MediaFragments()
     for cmd, pt in replay:
         seq = send_ctrl(s, seq, cmd, pt)
         if a.debug: sys.stderr.write(f"  -> cmd={cmd} payload={len(pt)}B\n")
-        early_media += pump(0.12)
+        for body in pump(0.12): early_media.append(body)
     sys.stderr.write(f"[*] replayed {len(replay)} commands; collecting MEDIA…\n")
 
     # collect one complete MEDIA frame, answering heartbeats so we stay connected
-    frags = []; started = False; jpg = None
+    frags = P.MediaFragments(); started = False; jpg = None
     def feed(body):
         nonlocal frags, started, jpg
         if (body[0] >> 7) == 1:
             if started and frags:
                 j = P.decrypt_media_frame(frags, session_key)
                 if j: jpg = j; return True
-            frags = [body]; started = True
+            frags = P.MediaFragments(); frags.append(body); started = True
         elif started:
             frags.append(body)
-            if len(frags) > 4096:          # guard against unbounded growth on desync
-                frags = []; started = False
         return False
     for body in early_media:
         if feed(body): break

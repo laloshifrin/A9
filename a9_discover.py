@@ -19,7 +19,7 @@ Stdlib only (pure-Python AES fallback via a9_proto), so it runs with no pip.
 WARNING: the recovered secret is a device credential. Keep it private; do not commit it.
 The camera handing it out to any unauthenticated UDP sender is a real weakness.
 """
-import sys, socket, time, os, argparse, gzip, json
+import sys, socket, time, os, argparse, gzip, json, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # find siblings under -I / any cwd
 import a9_proto as P
 
@@ -123,16 +123,18 @@ def save_config(path, dev):
     device credential: created 0600 from the start and written atomically."""
     cfg = {"did": dev.get("did"), "ip": dev.get("ip"), "port": dev.get("port", PORT),
            "secret": dev.get("secret"), "fw": dev.get("fw")}
-    tmp = f"{path}.tmp.{os.getpid()}"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp = None
     try:
+        fd, tmp = tempfile.mkstemp(prefix=".a9-config-", dir=os.path.dirname(os.path.abspath(path)))
         with os.fdopen(fd, "w") as f:
             json.dump(cfg, f, indent=2)
         os.replace(tmp, path)
     except OSError as e:
-        try: os.unlink(tmp)
-        except OSError: pass
         raise SystemExit(f"could not write config {path}: {e}")
+    finally:
+        if tmp is not None:
+            try: os.unlink(tmp)
+            except FileNotFoundError: pass
     return cfg
 
 def load_config(path):
@@ -142,6 +144,32 @@ def load_config(path):
             return json.load(f)
     except Exception:
         return None
+
+def resolve_credentials(ip=None, did=None, secret=None, config=CONFIG_DEFAULT,
+                        no_config=False, wait=3.0):
+    """Resolve one camera record without borrowing another camera's credentials."""
+    cfg = None if no_config else load_config(config)
+    if cfg:
+        if not isinstance(cfg, dict):
+            raise SystemExit("camera config must be a JSON object")
+        if did and cfg.get("did") != did:
+            cfg = None
+        elif ip and cfg.get("ip") != ip:
+            cfg = None
+    if cfg:
+        did = did or cfg.get("did")
+        secret = secret or cfg.get("secret")
+        ip = ip or cfg.get("ip")
+    if not (did and secret and ip):
+        dev = select_one(discover(ip, wait=wait), did)
+        if ip and dev.get("ip") != ip:
+            raise SystemExit("requested camera IP did not answer discovery")
+        did = did or dev.get("did")
+        secret = secret or dev.get("secret")
+        ip = ip or dev.get("ip")
+    if not all(isinstance(v, str) and v for v in (ip, did, secret)):
+        raise SystemExit("could not resolve camera IP, DID and secret")
+    return ip, did.encode(), secret.encode()
 
 def main():
     ap = argparse.ArgumentParser(description="discover A9 cameras on the LAN")

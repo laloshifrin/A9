@@ -130,3 +130,25 @@ settings in the app do not change the live stream.
 
 For local interoperability and security research on hardware you own. Do not use it
 against devices you do not own. No warranty.
+
+## Offline captures and tests
+
+Offline extraction accepts one authenticated camera session per capture. Captures
+with multiple sessions are rejected instead of combining their keys and video.
+The reader separates TCP connections using handshake and close packets, supports
+sequence wrap, and rejects missing bytes or conflicting retransmissions. A capture
+that omits connection boundaries cannot reliably distinguish a reused TCP tuple.
+Each reassembled direction is limited to 64 MiB; each JPEG is limited to 8 MiB.
+
+Explicit camera identifiers or IPs that differ from the saved config trigger fresh
+discovery. Credentials from a different camera are never borrowed from that config.
+Snapshots older than `--max-age` seconds return HTTP 503; the default is 10 seconds.
+
+Run the hardware-free regression tests with:
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 a9_aes.py
+```
+
+CI runs these checks on Python 3.8 and 3.13, with and without PyCryptodome.

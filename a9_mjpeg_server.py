@@ -15,7 +15,7 @@ Endpoints:
     /snapshot.jpg   the latest single frame                 (HA: "Generic Camera" still)
     /status         JSON: battery, firmware, connected/streaming (from cmd-2780 pushes)
 
-Reuses the protocol/crypto from a9_live_snapshot.py (which reuses a9_aes.py), so
+Uses the shared protocol/crypto in a9_proto.py, so
 no external dependencies. Reconnects automatically if the camera drops the session.
 
 Credentials come from --did/--secret, else a9_camera.json, else UDP discovery
@@ -59,12 +59,7 @@ class Latest:
             return None, last_seq
 
 # ---------- one camera session (reconnecting) ----------
-# This camera stops the MEDIA stream after ~40s while keeping the control channel
-# alive (it keeps sending 107 heartbeats). The long-stream keepalive the vendor app
-# uses was never in our short "grab a photo" captures, so instead of guessing it we
-# rely on what is proven: a fresh session streams reliably for ~40s. A stall watchdog
-# in _session reconnects when frames stop, which keeps the feed continuous apart from
-# a short (~2-3s) gap at each reconnect.
+# Keep one session alive with frame acknowledgements; reconnect on a media stall.
 def camera_loop(ip, did, secret, state, timeout, start_seq):
     while not state.stop:
         s = None
@@ -115,7 +110,7 @@ def _run_session(s, did, secret, state, timeout, start_seq):
         elif cmd == P.CMD_HELLO:
             s.sendall(P.build_ctrl(rseq, P.CMD_HELLO, P.pb_varint_field(1, 1), flag=0x0D))
 
-    frags = []; started = False; last_media = time.time(); frame_count = 0
+    frags = P.MediaFragments(); started = False; last_media = time.time(); frame_count = 0
     def process(mt, body):
         nonlocal frags, started, last_media, frame_count
         if mt == 4:
@@ -135,11 +130,9 @@ def _run_session(s, did, secret, state, timeout, start_seq):
                     jpg = P.decrypt_media_frame(frags, session_key)
                     if jpg:
                         state.publish(jpg)
-                frags = [body]; started = True
+                frags = P.MediaFragments(); frags.append(body); started = True
             elif started:
                 frags.append(body)
-                if len(frags) > 4096:    # no frame-start for far too long: drop, don't grow unbounded
-                    frags = []; started = False
 
     def pump(dur):
         end = time.time() + dur
@@ -251,21 +244,8 @@ def make_handler(state, first_timeout, max_age):
     return H
 
 def resolve_creds(a):
-    did = a.did.encode() if a.did else None
-    secret = a.secret.encode() if a.secret else None
-    ip = None if (a.ip in (None, "auto")) else a.ip
-    if not a.no_config and not (did and secret and ip):
-        cfg = D.load_config(a.config)
-        if cfg:
-            did = did or (cfg.get("did") and cfg["did"].encode())
-            secret = secret or (cfg.get("secret") and cfg["secret"].encode())
-            ip = ip or cfg.get("ip")
-            sys.stderr.write(f"[*] loaded {a.config}\n")
-    if not (did and secret) or ip is None:
-        sys.stderr.write("[*] discovering camera over UDP…\n")
-        d_did, d_secret, d_ip = D.creds_from_discovery(ip, a.did, a.disc_wait)
-        did = did or d_did; secret = secret or d_secret; ip = ip or d_ip
-    return ip, did, secret
+    return D.resolve_credentials(None if a.ip in (None, "auto") else a.ip,
+                                 a.did, a.secret, a.config, a.no_config, a.disc_wait)
 
 def main():
     ap = argparse.ArgumentParser(description="live MJPEG/snapshot server for an A9 camera")

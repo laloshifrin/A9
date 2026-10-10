@@ -36,8 +36,10 @@ documented in the public analyses under [References](#references). `.env` is git
 
 ## Quick start
 
-No pip install needed (pure-Python AES fallback is bundled). On the same network as
-the camera, or joined to its AP:
+Requirements: **Python 3.8+**, standard library only. A bundled pure-Python AES
+(`a9_aes.py`) means no pip install is needed; `pycryptodome` is used automatically if
+present (faster), and `Pillow` is optional (only for the `extract_a9_frames.py` contact
+sheet). On the same network as the camera, or joined to its AP:
 
 ```bash
 # discover the camera, read its own credentials, grab a frame — zero input
@@ -79,6 +81,7 @@ gitignored. Keep it local.
 | `a9_live_snapshot.py` | online: grab a JPEG; auto-discovers IP + credentials, or reads the config |
 | `a9_mjpeg_server.py` | online: live MJPEG + snapshot HTTP server (browser / Home Assistant) |
 | `a9_discover.py` | online: UDP discovery; decodes DID / IP / port / firmware / secret; writes the config |
+| `a9_proto.py` | shared PPRPC primitives (varint/protobuf, crypto, framing, pcap) used by all tools |
 | `a9_aes.py` | pure-Python AES-CBC (stdlib only, so the tools run with no pip / no internet) |
 | `a9_keys.py` | loads the shared prekey from `A9_PREKEY` / `.env` (not hardcoded) |
 | `extract_a9_snapshot.py` | offline: a packet capture to the first JPEG (also a library used by the live client) |

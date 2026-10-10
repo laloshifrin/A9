@@ -400,6 +400,7 @@ is the application layer above it.
 | `a9_live_snapshot.py` | **online**: grab a JPEG; auto-discovers IP+creds, or reads a config |
 | `a9_mjpeg_server.py` | **online**: live MJPEG + snapshot HTTP server (browser / Home Assistant) |
 | `a9_discover.py` | **online**: UDP discovery; decodes DID/IP/port/fw/secret (cmd 2600); writes config |
+| `a9_proto.py` | shared PPRPC primitives (varint/protobuf, crypto, framing, pcap, FrameReader) |
 | `a9_aes.py` | pure-Python AES-CBC fallback (stdlib only, no pip) |
 | `a9_keys.py` | loads the shared prekey from `A9_PREKEY` / `.env` (kept out of source) |
 | `extract_a9_snapshot.py` | offline: pcap → first JPEG (also a lib used by the live client) |

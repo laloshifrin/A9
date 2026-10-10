@@ -47,78 +47,26 @@ CRYPTO  (gen_crypt_key @0x5d790 ; AES wrapper 0x5daa0 ; MD5 consts @0x7d270)
 >>>  Do NOT publish or paste them anywhere. They authenticate to your camera.
 ===============================================================================
 """
-import sys, struct, hashlib, argparse
+import sys, os, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))   # find siblings under -I / any cwd
+import a9_proto as P
 
-def _ctrl_secret():                              # shared prekey, loaded from env/.env
-    import os, importlib.util
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "a9_keys.py")
-    s = importlib.util.spec_from_file_location("a9_keys", p)
-    m = importlib.util.module_from_spec(s); s.loader.exec_module(m)
-    return m.ctrl_prekey()
-STATIC_SECRET = _ctrl_secret()                   # @0x156620  (CTRL/FILE base)
-PORT = 20190
-try:
-    from Crypto.Cipher import AES                 # pip install pycryptodome
-except Exception:
-    AES = None
+PORT = P.PORT
+read_varint = P.read_varint          # lenient varint (shared)
+ctrl_key = P.ctrl_key                # md5(prekey,ID:-SEQ:-RPC:) -> 32-hex AES-256 key
 
-# ---------- protobuf-style varint (firmware 0xc0fec) ----------
-def read_varint(buf, i):
-    shift = 0; val = 0
-    for _ in range(10):
-        b = buf[i]; i += 1
-        val |= (b & 0x7f) << shift
-        if not (b & 0x80):
-            return val & 0xFFFFFFFFFFFFFFFF, i
-        shift += 7
-    raise ValueError("varint too long")
-
-# ---------- CTRL key (gen_crypt_key scheme 4) ----------
-# CONFIRMED against a real capture:
-#   key = lower_hex(MD5("<secret>,ID:<cmdid>-SEQ:<seq>-RPC:<rpc>"))   (32 ASCII bytes)
+# ---------- CTRL key / cipher (gen_crypt_key scheme 4), CONFIRMED on a real capture ----------
+#   key = lower_hex(MD5("<prekey>,ID:<cmdid>-SEQ:<seq>-RPC:<rpc>"))   (32 ASCII bytes)
 #   cipher = AES-256-CBC + PKCS#7 ,  IV = key[:16]
-#   ID  = command id  = 2nd exhdr varint (field2)
-#   SEQ = sequence    = 1st exhdr varint (msgid)
-#   RPC = 3rd exhdr field (cmd_id) if present, else 0
-def ctrl_key(cmd_id, seq, rpc):
-    s = b"%s,ID:%d-SEQ:%d-RPC:%d" % (STATIC_SECRET, cmd_id, seq, rpc)
-    return hashlib.md5(s).hexdigest().encode()   # 32 ASCII hex bytes -> AES-256
-
+#   ID = exhdr field2 (2nd varint), SEQ = exhdr msgid (1st varint), RPC = flagbyte & 3
 def aes_cbc_dec(key, ct):
-    if AES is None:
-        raise SystemExit("need: pip install pycryptodome")
-    if len(ct) == 0 or len(ct) % 16: return None
-    pt = AES.new(key, AES.MODE_CBC, key[:16]).decrypt(ct)
+    if len(ct) == 0 or len(ct) % 16:
+        return None
+    pt = P.aes_cbc_decrypt(key, key[:16], ct)
     pad = pt[-1]
-    if 1 <= pad <= 16 and pt.endswith(bytes([pad]) * pad):
-        return pt[:-pad]
-    return None
+    return pt[:-pad] if 1 <= pad <= 16 and pt.endswith(bytes([pad]) * pad) else None
 
-# ---------- generic protobuf dump ----------
-def parse_protobuf(buf):
-    out = {}; i = 0; n = len(buf)
-    while i < n:
-        try:
-            tag, i = read_varint(buf, i)
-        except Exception:
-            break
-        field, wt = tag >> 3, tag & 7
-        if wt == 0:
-            v, i = read_varint(buf, i)
-        elif wt == 2:
-            ln, i = read_varint(buf, i)
-            if i + ln > n: break
-            v = buf[i:i+ln]; i += ln
-        elif wt == 5:
-            if i + 4 > n: break
-            v = struct.unpack("<I", buf[i:i+4])[0]; i += 4
-        elif wt == 1:
-            if i + 8 > n: break
-            v = struct.unpack("<Q", buf[i:i+8])[0]; i += 8
-        else:
-            break
-        out.setdefault(field, []).append(v)
-    return out
+parse_protobuf = P.pb_parse          # shared lenient protobuf parser
 
 def show_field(v):
     if isinstance(v, bytes):
@@ -130,22 +78,10 @@ def show_field(v):
         return v.hex()
     return v
 
-# ---------- PPRPC framing ----------
+# ---------- PPRPC framing (verbose: exhdr parsed into a dict for printing) ----------
 def iter_pprpc(stream):
-    """Yield (msgtype, msgflag, exhdr_dict, payload) from a reassembled TCP dir."""
-    i = 0; n = len(stream)
-    while i < n:
-        ctrl = stream[i]; msgtype = (ctrl >> 4) & 0xF; msgflag = ctrl & 0xF
-        if msgtype not in (2, 3, 4, 5, 6, 7, 8):   # not a pprpc frame start
-            i += 1; continue
-        j = i + 1
-        try:
-            remain, j = read_varint(stream, j)
-        except Exception:
-            i += 1; continue
-        if remain <= 0 or j + remain > n:
-            i += 1; continue
-        body = stream[j:j + remain]; i = j + remain
+    """Yield (msgtype, msgflag, exhdr_dict, payload), reusing a9_proto's framing."""
+    for msgtype, msgflag, body in P.iter_pprpc(stream):
         ex = {}; p = 0
         try:
             ex["msgid"], p = read_varint(body, p)
@@ -172,56 +108,9 @@ def decrypt_ctrl(ex, ct):
         return pt, k, f"ID={cmd_id} SEQ={seq} RPC={rpc}"
     return None, None, None
 
-# ---------- minimal pcap reader (classic tcpdump format, no deps) ----------
+# ---------- pcap reader (shared, sequence-aware TCP reassembly) ----------
 def read_pcap_tcp(path):
-    data = open(path, "rb").read()
-    magic = data[:4]
-    if magic in (b"\xa1\xb2\xc3\xd4", b"\xd4\xc3\xb2\xa1"):
-        le = magic == b"\xd4\xc3\xb2\xa1"
-    elif magic == b"\x0a\x0d\x0d\x0a":
-        raise SystemExit("pcapng not supported; capture with `tcpdump -w` (classic pcap)")
-    else:
-        raise SystemExit("not a pcap file")
-    end = "<" if le else ">"
-    linktype = struct.unpack(end + "I", data[20:24])[0]
-    i = 24; flows = {}   # (src,sport,dst,dport) -> list[(seq,payload)]
-    while i + 16 <= len(data):
-        _, _, caplen, _ = struct.unpack(end + "IIII", data[i:i+16]); i += 16
-        pkt = data[i:i+caplen]; i += caplen
-        # link-layer header size by DLT
-        if linktype == 1:            # EN10MB (Ethernet)
-            if len(pkt) >= 14 and pkt[12:14] not in (b"\x08\x00", b"\x86\xdd"):
-                continue
-            off = 14
-        elif linktype == 101:        # RAW (bare IP) -- PCAPdroid
-            off = 0
-        elif linktype == 0:          # NULL/loopback (4-byte family)
-            off = 4
-        elif linktype == 113:        # LINUX_SLL
-            off = 16
-        elif linktype == 276:        # LINUX_SLL2
-            off = 20
-        else:
-            off = 0
-        if len(pkt) < off + 20: continue
-        ip = pkt[off:]
-        if (ip[0] >> 4) != 4: continue   # IPv4 only (extend if needed)
-        ihl = (ip[0] & 0xF) * 4
-        if ip[9] != 6: continue                      # TCP
-        src = ".".join(map(str, ip[12:16])); dst = ".".join(map(str, ip[16:20]))
-        tcp = ip[ihl:]
-        sport, dport = struct.unpack(">HH", tcp[0:4])
-        seq = struct.unpack(">I", tcp[4:8])[0]
-        doff = (tcp[12] >> 4) * 4
-        payload = tcp[doff:]
-        if not payload: continue
-        if PORT not in (sport, dport): continue
-        flows.setdefault((src, sport, dst, dport), []).append((seq, payload))
-    streams = {}
-    for key, segs in flows.items():
-        segs.sort()
-        streams[key] = b"".join(p for _, p in segs)
-    return streams
+    return P.read_pcap_streams(path, PORT)
 
 # ---------- main ----------
 def decode_direction(label, stream):

@@ -155,13 +155,23 @@ def iter_pprpc(stream):
 
 # ---------- MEDIA ----------
 def media_exhdr(body):
-    """returns (frame_start_flag, AVChannel, AVSeq, TT, enclen, data)."""
-    p = 0
-    flag = body[p] >> 7; p += 1          # byte0 bit7 = frame-start
-    p += 1                                # byte1 = EncType (assumed CBC)
+    """Return (start, AVChannel, AVSeq, TT, enclen, payload).
+
+    Five varints are followed by a fixed two-byte fragment marker. In this
+    camera's captures, ordinary markers are 01 00, 02 00, etc.; ff 00 marks
+    the final fragment. Reading that marker as varints consumes JPEG bytes.
+    """
+    if len(body) < 2:
+        raise ValueError("truncated MEDIA header")
+    flag = body[0] >> 7
+    p = 2
     vs = []
-    for _ in range(7):
-        v, p = dec_varint(body, p); vs.append(v)
+    for _ in range(5):
+        v, p = dec_varint(body, p)
+        vs.append(v)
+    if p + 2 > len(body):
+        raise ValueError("truncated MEDIA fragment marker")
+    p += 2
     return flag, vs[0], vs[1], vs[2], vs[3], body[p:]
 
 def decrypt_media_frame(frags, session_key):

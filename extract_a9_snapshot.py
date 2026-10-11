@@ -33,7 +33,8 @@ def authenticated_sessions(streams):
 
 def select_session(streams, session_key=None):
     matches = [(flow, key) for flow, key in authenticated_sessions(streams)
-               if session_key is None or key == session_key]
+               if (session_key is None or key == session_key)
+               and any(mt == 6 for mt, _, _ in P.iter_pprpc(streams[flow]))]
     if not matches:
         raise SystemExit("no LanAuth response with a MEDIA key found")
     if len(matches) != 1:

@@ -74,6 +74,13 @@ class RegressionTests(unittest.TestCase):
             self.assertEqual(frags.byte_count, 0)
             self.assertEqual(frags, [])
 
+    def test_final_media_marker_preserves_jpeg_bytes(self):
+        for prefix in (b"\x72", b"\xc7\x14", b"\xff\x00", b"\x80" * 10 + b"\x01"):
+            payload = prefix + b"entropy\xff\xd9"
+            body = b"\x04\x00" + b"\x00\x00\x00\x00\x01" + b"\xff\x00" + payload
+            self.assertEqual(P.media_exhdr(body)[-1], payload)
+        with self.assertRaises(ValueError): P.media_exhdr(b"\x04\x00" + b"\x00" * 5 + b"\xff")
+
     def test_extraction_selects_auth_flow(self):
         key = b'0' * 32
         auth_flow = ('192.0.2.1', P.PORT, '192.0.2.2', 12345, 1)

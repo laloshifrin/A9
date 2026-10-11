@@ -82,7 +82,8 @@ v0      varint    # AVChannel
 v1      varint    # AVSeq  = frame index (0,1,2,…)
 v2      varint    # TT     = capture timestamp (ms)
 v3      varint    # enclen = encrypted-prefix length (nonzero only on frag0)
-v4..v6  varints   # incl. fragment index
+v4      varint    # observed 1
+fragment 2 bytes  # observed 01 00, 02 00, ...; ff 00 = final fragment
 payload           # JPEG bytes (see E)
 ```
 
@@ -140,8 +141,9 @@ Command ids are the CTRL `cmd_id`. Names from the firmware dispatch table
 
 - **[M][F] Codec: MJPEG** (baseline JPEG, observed 640×480). Beken HW JPEG encoder
   (`ejpeg`).
-- **[M] One JPEG per frame, split into 8 MEDIA fragments** (frame-start flag on the
-  first). `AVSeq`/`TT`/`AVChannel` are constant across a frame’s fragments.
+- **[M] One JPEG per frame, split into 8 or 9 MEDIA fragments in the reviewed capture** (frame-start flag on the
+  first). `AVSeq`/`AVChannel` are constant across a frame’s fragments;
+  `TT` changes between fragments. The key uses the encrypted fragment’s timestamp.
 - **[F][M] Only the first fragment’s first `enclen` bytes are AES-encrypted**
   (the JPEG header + start of scan). Everything else — the rest of frag0 and all
   continuation fragments — is **plaintext JPEG**. Gated in the media handler
@@ -448,3 +450,12 @@ the client: `--did/--secret` → `--creds-from <pcap>` → config file → UDP d
   same shared prekey).
 - **Vendor / app**: XC Things; Android app `Linklemo`, package `com.xcthings.fchan`.
 - **Hardware**: PCB `INO-IPC-A9` (also sold as "Pinmei A9"), Beken BK7252N SoC.
+
+### MEDIA parsing correction
+
+The fragment marker is two fixed bytes, not two varints. In the captured video,
+regular markers are `01 00`, `02 00`, and so on; the final marker is `ff 00`.
+The earlier seven-varint parser consumed both bytes of `ff 00` as a single varint,
+then consumed the beginning of the final JPEG fragment as its seventh varint.
+That dropped entropy-coded bytes near the end of the image and caused corruption
+in the bottom-right corner. Keep the marker separate from the five preceding varints.

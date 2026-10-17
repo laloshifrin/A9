@@ -17,6 +17,7 @@ You may have different python versions and may try different module versions.
 There are also different A9 cameras that may work with this.
 Let me know of any other working rig.
 
+Special infinite thanks to **Zoltan Feher aka zkiiito** who did the hard work
 
 # A9 local camera client
 

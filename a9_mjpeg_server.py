@@ -14,7 +14,7 @@ Endpoints:
     /stream.mjpg    multipart/x-mixed-replace MJPEG stream  (HA: "MJPEG IP Camera")
     /snapshot.jpg   the latest single frame                 (HA: "Generic Camera" still)
     /status         JSON: battery, firmware, connected/streaming (from cmd-2780 pushes)
-    /stream         brovser stream with audio
+    /stream         browser stream with audio
     /live.ts        vlc, mpv and possibly other players stream with audio
     
 Uses the shared protocol/crypto in a9_proto.py, so

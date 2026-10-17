@@ -73,7 +73,7 @@ python3 a9_discover.py --save-config          # writes a9_camera.json (chmod 600
 python3 a9_live_snapshot.py -o snapshot.jpg   # reads a9_camera.json if present
 ```
 
-### Live feed (browser / Home Assistant)
+### Live feed (browser / Home Assistant / multimedia players)
 
 ```bash
 python3 a9_mjpeg_server.py                     # then open http://127.0.0.1:8080/
@@ -86,6 +86,7 @@ It holds one session to the camera and serves `/stream.mjpg` (MJPEG, ~10 fps),
 a stall watchdog reconnects only if the network actually drops.
 `/status` returns JSON (battery, firmware/model, connected/streaming) decoded from the
 camera's `2780` status pushes, handy for a Home Assistant REST sensor.
+
 In this fork I added those endpoins: /stream a brovser stream with audio and /live.ts stream with audio for vlc, mpv and possibly other players.
 
 For Home Assistant, point an **MJPEG IP Camera** at `.../stream.mjpg`, or a **Generic

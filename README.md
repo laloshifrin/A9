@@ -1,3 +1,7 @@
+# This is a fork
+
+of <https://github.com/zkiiito/A9> great work. I only added audio support and a few of minor changes.
+
 # A9 local camera client
 
 A standalone, local client for the cheap XCThings / Linklemo "A9" WiFi camera
@@ -66,6 +70,7 @@ It holds one session to the camera and serves `/stream.mjpg` (MJPEG, ~10 fps),
 a stall watchdog reconnects only if the network actually drops.
 `/status` returns JSON (battery, firmware/model, connected/streaming) decoded from the
 camera's `2780` status pushes, handy for a Home Assistant REST sensor.
+In this fork I added those endpoins: /stream a brovser stream with audio and /live.ts stream with audio for vlc, mpv and possibly other players.
 
 For Home Assistant, point an **MJPEG IP Camera** at `.../stream.mjpg`, or a **Generic
 Camera** still-image URL at `.../snapshot.jpg`. The feed is unauthenticated, so it
@@ -125,7 +130,7 @@ settings in the app do not change the live stream.
   [`Yeti47/cheap-shot`](https://github.com/Yeti47/cheap-shot) (Go PPRPC implementation)
 - Vendor: XC Things; app `Linklemo` / `com.xcthings.fchan`
 - Hardware: PCB `INO-IPC-A9` (also sold as "Pinmei A9"), Beken BK7252N
-
+- <https://www.elektroda.com/rtvforum/topic4118499-120.html>
 ## Scope and legal
 
 For local interoperability and security research on hardware you own. Do not use it

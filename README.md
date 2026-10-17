@@ -8,10 +8,15 @@ It was only tested in my environment:
 -Python 3.10.12
 
 -Chromium 147.0.7750.0
+
 -Firefox 135.0
+
 -vlc 3.0.16
+
 -mpv 0.34.1
+
 -camera INO-A10N-V2.3 Ca13
+
 av and numpy python modules are the dependancies, In my case i installed with python3 -m pip install --only-binary=:all: "av==14.2.0" and python3 -m pip install numpy.
 You may have different python versions and may try different module versions.
 There are also different A9 cameras that may work with this.

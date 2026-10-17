@@ -4,7 +4,6 @@ of <https://github.com/zkiiito/A9> great work. I only added audio support and a 
 It was only tested in my environment:
 
 -Linux Lubuntu 22.04.4 LTS
-
 -Python 3.10.12
 
 -Chromium 147.0.7750.0
@@ -17,7 +16,7 @@ It was only tested in my environment:
 
 -camera INO-A10N-V2.3 Ca13
 
-av and numpy python modules are the dependancies, In my case i installed with python3 -m pip install --only-binary=:all: "av==14.2.0" and python3 -m pip install numpy.
+av and numpy python modules are the dependancies, In my case i installed them with python3 -m pip install --only-binary=:all: "av==14.2.0" and python3 -m pip install numpy.
 You may have different python versions and may try different module versions.
 There are also different A9 cameras that may work with this.
 Let me know of any other working rig.
@@ -152,6 +151,7 @@ settings in the app do not change the live stream.
 - Vendor: XC Things; app `Linklemo` / `com.xcthings.fchan`
 - Hardware: PCB `INO-IPC-A9` (also sold as "Pinmei A9"), Beken BK7252N
 - <https://www.elektroda.com/rtvforum/topic4118499-120.html>
+- 
 ## Scope and legal
 
 For local interoperability and security research on hardware you own. Do not use it

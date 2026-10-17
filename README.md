@@ -12,7 +12,7 @@ It was only tested in my environment:
 - camera INO-A10N-V2.3 Ca13
 
 
-av and numpy python modules are the dependancies, In my case i installed them with python3 -m pip install --only-binary=:all: "av==14.2.0" and python3 -m pip install numpy.
+av and numpy python modules are the dependancies, In my case i installed them with `python3 -m pip install --only-binary=:all: "av==14.2.0"` and `python3 -m pip install numpy`.
 You may have different python versions and may try different module versions.
 There are also different A9 cameras that may work with this.
 Let me know of any other working rig.

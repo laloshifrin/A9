@@ -87,7 +87,7 @@ a stall watchdog reconnects only if the network actually drops.
 `/status` returns JSON (battery, firmware/model, connected/streaming) decoded from the
 camera's `2780` status pushes, handy for a Home Assistant REST sensor.
 
-In this fork I added those endpoins: /stream a brovser stream with audio and /live.ts stream with audio for vlc, mpv and possibly other players.
+In this fork I added those endpoins: `/stream` a brovser stream with audio and `/live.ts` stream with audio for vlc, mpv and possibly other players.
 
 For Home Assistant, point an **MJPEG IP Camera** at `.../stream.mjpg`, or a **Generic
 Camera** still-image URL at `.../snapshot.jpg`. The feed is unauthenticated, so it

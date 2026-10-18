@@ -1,6 +1,6 @@
 # This is a fork
 
-of <https://github.com/zkiiito/A9> great work. I only added audio support and a few of minor changes.
+of <https://github.com/zkiiito/A9> great work. I only added audio support and a few minor changes.
 It was only tested in my environment:
 
 - Linux Lubuntu 22.04.4 LTS

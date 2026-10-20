@@ -75,6 +75,8 @@ def decode_alaw(data):
 
 class Latest:
     def __init__(self):
+        self.client_count = 0
+        self.camera_wanted = False
         self.cond = threading.Condition()
         self.jpeg = None
         self.seq = 0
@@ -129,63 +131,139 @@ class Latest:
             if self.seq != last_seq:
                 return self.jpeg, self.seq
             return None, last_seq
+    def acquire_client(self):
+        """Registration of client requesting streaming."""
+        with self.cond:
+            self.client_count += 1
 
+            if self.client_count == 1:
+                self.camera_wanted = True
+                self.connected = False
+                self.jpeg = None
+                self.last_frame_ts = 0.0
+
+                with self.audio_cond:
+                    self.audio_chunks.clear()
+                    self.audio_bytes = 0
+
+            self.cond.notify_all()
+
+    def release_client(self):
+        """Release client and stops sessione if necessary."""
+        sock = None
+
+        with self.cond:
+            if self.client_count > 0:
+                self.client_count -= 1
+
+            if self.client_count == 0:
+                self.camera_wanted = False
+                self.connected = False
+
+                with self.socket_lock:
+                    sock = self.camera_socket
+
+            self.cond.notify_all()
+
+        # shuts socket.
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 # ---------- Camera session ----------
 
 def camera_loop(ip, did, secret, state, timeout, start_seq):
     while not state.stop:
-        s = None
-        try:
-            s = socket.create_connection((ip, P.PORT), timeout=timeout)
 
-            # active socket so main() can stop it immediately with Ctrl+C.
-            with state.socket_lock:
-                state.camera_socket = s
+        # waits first client without opening connennection to camera.
+        with state.cond:
+            while not state.stop and not state.camera_wanted:
+                state.cond.wait()
 
-            # stop could have been requested while
-            # create_connection() was runnung.
             if state.stop:
                 break
 
-            _run_session(s, did, secret, state, timeout, start_seq)
+        s = None
 
-        except Exception as e:
-            if not state.stop:
+        try:
+            # Verifies before opening new connection.
+            with state.cond:
+                if state.stop or not state.camera_wanted:
+                    continue
+
+            s = socket.create_connection(
+                (ip, P.PORT),
+                timeout=timeout,
+            )
+
+            with state.socket_lock:
+                state.camera_socket = s
+
+            # a client could have been disconnected during connect().
+            with state.cond:
+                wanted = state.camera_wanted and not state.stop
+
+            if wanted:
+                _run_session(
+                    s, did, secret, state, timeout, start_seq
+                )
+
+        except Exception as exc:
+            with state.cond:
+                wanted = state.camera_wanted and not state.stop
+
+            if wanted:
                 sys.stderr.write(
-                    f"[camera] session error: {e}; "
+                    f"[camera] session error: {exc}; "
                     "reconnecting in 2s\n"
                 )
-                # prevents delay during reconnection pause.
-                state.cond.acquire()
-                try:
-                    state.cond.wait(timeout=2.0)
-                finally:
-                    state.cond.release()
 
         finally:
-
             with state.socket_lock:
                 if state.camera_socket is s:
                     state.camera_socket = None
 
             if s is not None:
+                sys.stderr.write(
+                    "[camera] Disconnection from camera.\n"
+                )
+                sys.stderr.flush()
+
                 try:
                     s.shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
+
                 try:
                     s.close()
                 except OSError:
                     pass
 
-        if not state.stop:
-            # short pause, breakable by Ctrl+C.
-            state.cond.acquire()
-            try:
-                state.cond.wait(timeout=0.2)
-            finally:
-                state.cond.release()
+            with state.cond:
+                state.connected = False
+                state.cond.notify_all()
+
+        # Reconnection only if at least une client exists.
+        with state.cond:
+            if state.stop:
+                break
+
+            if not state.camera_wanted:
+                continue
+
+            # brakable wait: if every client exit,
+            # go back to wait without making new connections.
+            state.cond.wait_for(
+                lambda: state.stop or not state.camera_wanted,
+                timeout=2.0,
+            )
 
 
 def _run_session(s, did, secret, state, timeout, start_seq):
@@ -363,7 +441,11 @@ def _run_session(s, did, secret, state, timeout, start_seq):
     def pump(dur):
         end = time.time() + dur
 
-        while time.time() < end and not state.stop:
+        while (
+            time.time() < end
+            and not state.stop
+            and state.camera_wanted
+        ):
             try:
                 mt, mf, body = rdr.next_frame(
                     timeout=max(0.05, end - time.time())
@@ -394,6 +476,9 @@ def _run_session(s, did, secret, state, timeout, start_seq):
         pump(0.15)
 
     state.connected = True
+    if state.stop or not state.camera_wanted:
+        state.connected = False
+        return
     last_media = time.time()
 
     sys.stderr.write("[camera] authenticated; streaming\n")
@@ -407,7 +492,7 @@ def _run_session(s, did, secret, state, timeout, start_seq):
 #     + 10.0
     audio_sent = False
 
-    while not state.stop:
+    while not state.stop and state.camera_wanted:
         now = time.time()
 
         if now - last_ping >= 0.1:
@@ -729,6 +814,29 @@ def make_handler(state, first_timeout, max_age):
                     output.close()
 
         def do_GET(self):
+            # only endpoints that relly need media
+            # keep camera active.
+            path = self.path.split("?", 1)[0]
+
+            active = (
+                path == "/live.ts"
+                or path == "/stream.mjpg"
+                or self.path == "/stream?raw=1"
+                or path == "/snapshot.jpg"
+                or path == "/snapshot"
+            )
+
+            if not active:
+                return self._do_GET_inner()
+
+            state.acquire_client()
+
+            try:
+                return self._do_GET_inner()
+            finally:
+                state.release_client()
+
+        def _do_GET_inner(self):
         
             if self.path == "/live.ts":
                 if self._wait_first() is None:
@@ -745,16 +853,25 @@ def make_handler(state, first_timeout, max_age):
 
                 try:
                     self.stream_ts()
+
                 except (
                     BrokenPipeError,
                     ConnectionResetError,
                     OSError,
                 ):
+                    # player disconnected.
                     pass
+
                 except Exception as exc:
-                    sys.stderr.write(
-                        f"[MPEGTS] error: {exc!r}\n"
-                    )
+                    # PyAV error management.
+                    if type(exc).__name__ == "PyAVCallbackError":
+                        sys.stderr.write(
+                            "[MPEGTS] Client player disconnected.\n"
+                        )
+                    else:
+                        sys.stderr.write(
+                            f"[MPEGTS] error: {exc!r}\n"
+                        )
 
                 return        
         
@@ -1003,13 +1120,12 @@ def main():
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
-        sys.stderr.write("\n[shutdown] Ctrl+C ricevuto\n")
+        sys.stderr.write("\n[shutdown] Ctrl+C received\n")
     finally:
-        # 1. avoids new sessions.
-        state.stop = True
-
-        # 2. Unlock threads waiting for new frames.
+        # 1. Stops server and camera session.
         with state.cond:
+            state.stop = True
+            state.camera_wanted = False
             state.cond.notify_all()
 
         # 3. Stops TCP socket
